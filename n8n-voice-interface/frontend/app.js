@@ -98,45 +98,52 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Start continuous listening mode
     async function startListening() {
-        // Get microphone stream - specify audio quality parameters
-        microphoneStream = await navigator.mediaDevices.getUserMedia({ 
-            audio: {
-                channelCount: 1,
-                sampleRate: 44100, // Higher sample rate for better quality
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            } 
-        });
-        
-        // Setup audio context and analyzer
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        audioSource = audioContext.createMediaStreamSource(microphoneStream);
-        audioAnalyser = audioContext.createAnalyser();
-        
-        // Configure analyzer
-        audioAnalyser.fftSize = 256;
-        audioAnalyser.smoothingTimeConstant = 0.8;
-        audioSource.connect(audioAnalyser);
-        
-        // Reset detection state
-        silenceStartTime = null;
-        speechDetected = false;
-        isListening = true;
-        isRecording = false;
-        
-        // Setup the media recorder with optimal settings
-        const mimeType = getSupportedMimeType();
-        const options = mimeType ? { mimeType, audioBitsPerSecond: 128000 } : {}; // 128kbps audio
-        mediaRecorder = new MediaRecorder(microphoneStream, options);
-        
-        // Start silence detection loop
-        startSilenceDetection();
-        
-        // Start visualization
-        visualizationContainer.classList.add('active-visualization');
-        
-        console.log("Continuous listening mode activated with audio settings:", options);
+        try {
+            // Get microphone stream with optimal quality settings for OpenAI
+            microphoneStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    channelCount: 1,                  // Mono audio (wymagane przez OpenAI)
+                    sampleRate: 44100,                // 44.1 kHz (standard CD)
+                    echoCancellation: true,           // Redukcja echa
+                    noiseSuppression: true,           // Redukcja szumów
+                    autoGainControl: true,            // Automatyczna kontrola wzmocnienia
+                    latency: 0                        // Minimalne opóźnienie
+                } 
+            });
+            
+            console.log("Uzyskano dostęp do mikrofonu z optymalnymi ustawieniami");
+            
+            // Setup audio context and analyzer
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            console.log(`Utworzono kontekst audio z sample rate: ${audioContext.sampleRate}Hz`);
+            
+            audioSource = audioContext.createMediaStreamSource(microphoneStream);
+            audioAnalyser = audioContext.createAnalyser();
+            
+            // Configure analyzer
+            audioAnalyser.fftSize = 256;
+            audioAnalyser.smoothingTimeConstant = 0.8;
+            audioSource.connect(audioAnalyser);
+            
+            // Reset detection state
+            silenceStartTime = null;
+            speechDetected = false;
+            isListening = true;
+            isRecording = false;
+            
+            // Start silence detection loop
+            startSilenceDetection();
+            
+            // Start visualization
+            visualizationContainer.classList.add('active-visualization');
+            
+            console.log("Ciągłe nasłuchiwanie aktywowane z optymalnymi ustawieniami audio");
+            return true;
+        } catch (error) {
+            console.error("Błąd podczas inicjalizacji mikrofonu:", error);
+            showMessage(`Nie można uzyskać dostępu do mikrofonu: ${error.message}`, 'error');
+            throw error;
+        }
     }
     
     // Stop continuous listening mode
@@ -317,10 +324,42 @@ document.addEventListener('DOMContentLoaded', () => {
             activeRequests++;
             updateStatus();
             
+            console.log(`Przetwarzanie nagrania #${recordingId}, oryginalny format: ${audioBlob.type}, rozmiar: ${audioBlob.size} bajtów`);
+            
+            // Optymalizuj audio dla OpenAI przed wysłaniem
+            let processedBlob = audioBlob;
+            try {
+                if (window.AudioConverter) {
+                    console.log("Konwertuję audio do optymalnego formatu...");
+                    processedBlob = await window.AudioConverter.optimizeForOpenAI(audioBlob);
+                    console.log(`Audio przekonwertowane, nowy format: ${processedBlob.type}, rozmiar: ${processedBlob.size} bajtów`);
+                }
+            } catch (conversionError) {
+                console.error("Błąd podczas konwersji audio:", conversionError);
+                // W razie błędu używamy oryginalnego blob
+                processedBlob = audioBlob;
+            }
+            
+            // Ustaw odpowiednią nazwę pliku i rozszerzenie na podstawie typu MIME
+            let filename = `recording-${recordingId}`;
+            if (processedBlob.type.includes('wav')) {
+                filename += '.wav';
+            } else if (processedBlob.type.includes('mpeg') || processedBlob.type.includes('mp3')) {
+                filename += '.mp3';
+            } else if (processedBlob.type.includes('webm')) {
+                filename += '.webm';
+            } else if (processedBlob.type.includes('ogg')) {
+                filename += '.ogg';
+            } else {
+                filename += '.wav'; // Domyślne rozszerzenie jeśli typ MIME jest nieznany
+            }
+            
             // Create form data for the API request
             const formData = new FormData();
-            formData.append('audio', audioBlob, `recording-${recordingId}.mp3`);
+            formData.append('audio', processedBlob, filename);
             formData.append('webhook_url', webhookUrl);
+            
+            console.log(`Wysyłam plik audio: ${filename}, rozmiar: ${processedBlob.size} bajtów, typ: ${processedBlob.type}`);
             
             // Send the audio to the backend
             const response = await fetch('/api/transcribe', {
@@ -538,15 +577,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Find supported MIME type with optimal audio quality
     function getSupportedMimeType() {
-        // Try common audio formats in order of preference for OpenAI compatibility
+        // Preferencja dla formatów obsługiwanych przez API OpenAI
         const mimeTypes = [
-            'audio/wav',          // Highest compatibility with OpenAI
-            'audio/webm',         // Good modern browser support
-            'audio/ogg;codecs=opus', // Good quality codec
-            'audio/mpeg',         // Fallback
-            'audio/mp4',          // Another fallback
-            'audio/webm;codecs=opus',
-            'audio/mp3'
+            'audio/wav',              // Najlepsza kompatybilność z OpenAI
+            'audio/mpeg',             // MP3 - dobra kompatybilność
+            'audio/mp3',              // Alternatywny MP3
+            'audio/webm;codecs=opus', // WebM z kodekiem Opus (wysoka jakość)
+            'audio/webm',             // Standardowy WebM
+            'audio/ogg;codecs=opus',  // Ogg z kodekiem Opus
+            'audio/ogg'               // Standardowy Ogg
         ];
         
         for (const type of mimeTypes) {
