@@ -1,25 +1,21 @@
 document.addEventListener('DOMContentLoaded', () => {
     // Elementy DOM
-    const recordButton = document.getElementById('record-button');
     const statusMessage = document.getElementById('status-message');
     const messageContainer = document.getElementById('message-container');
     const messageText = document.getElementById('message-text');
     const webhookUrlInput = document.getElementById('webhook-url');
     const saveSettingsButton = document.getElementById('save-settings');
     const conversationContainer = document.getElementById('conversation-container');
+    const recordButton = document.getElementById('record-button');
+    
+    // Tworzenie interfejsu tekstowego (zastępującego nagrywanie audio)
+    createTextInterface();
     
     // Audio player dla odpowiedzi
     let audioPlayer = new Audio();
     
     // Wczytaj zapisany URL webhooka z localStorage
     webhookUrlInput.value = localStorage.getItem('webhookUrl') || '';
-
-    // Zmienne stanu
-    let isRecording = false;
-    let mediaRecorder = null;
-    let audioChunks = [];
-    let recordingId = 0;
-    let microphoneStream = null;
     
     // Zapisz URL webhooka do localStorage
     saveSettingsButton.addEventListener('click', () => {
@@ -31,124 +27,134 @@ document.addEventListener('DOMContentLoaded', () => {
             showMessage('Proszę wprowadzić poprawny adres URL webhooka', 'error');
         }
     });
-
-    // Obsługa przycisku nagrywania (naciśnij i przytrzymaj)
-    recordButton.addEventListener('mousedown', startRecording);
-    recordButton.addEventListener('touchstart', startRecording);
-    recordButton.addEventListener('mouseup', stopRecording);
-    recordButton.addEventListener('touchend', stopRecording);
-    recordButton.addEventListener('mouseleave', stopRecording);
     
-    // Funkcja uruchamiająca nagrywanie
-    async function startRecording() {
-        try {
-            // Sprawdź, czy URL webhooka jest ustawiony
-            const webhookUrl = localStorage.getItem('webhookUrl');
-            if (!webhookUrl) {
-                showMessage('Proszę najpierw ustawić adres URL webhooka N8N w ustawieniach', 'error');
-                return;
-            }
+    // Funkcja tworząca interfejs tekstowy
+    function createTextInterface() {
+        // Ukryj przycisk nagrywania
+        if (recordButton) {
+            recordButton.style.display = 'none';
+        }
+        
+        // Utwórz formularz tekstowy
+        const textInterfaceHtml = `
+            <div class="text-interface">
+                <div class="form-group">
+                    <input type="text" id="text-input" placeholder="Wpisz wiadomość..." class="text-input">
+                    <button id="send-button" class="btn">
+                        <i class="fas fa-paper-plane"></i> Wyślij
+                    </button>
+                </div>
+            </div>
+        `;
+        
+        // Wstaw formularz do kontenera mikrofonu
+        const microphoneContainer = document.querySelector('.microphone-container');
+        if (microphoneContainer) {
+            microphoneContainer.innerHTML = textInterfaceHtml;
             
-            // Inicjalizacja nagrywania tylko jeśli jeszcze nie nagrywamy
-            if (!isRecording) {
-                // Resetujemy chunki audio
-                audioChunks = [];
-                
-                // Pobierz strumień audio z mikrofonu
-                microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                
-                // Utwórz MediaRecorder z najbardziej kompatybilnym formatem
-                let mimeType = 'audio/webm';
-                if (MediaRecorder.isTypeSupported('audio/webm')) {
-                    mimeType = 'audio/webm';
-                } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                    mimeType = 'audio/mp4';
-                } else if (MediaRecorder.isTypeSupported('audio/ogg')) {
-                    mimeType = 'audio/ogg';
+            // Dodaj obsługę zdarzeń dla formularza
+            const textInput = document.getElementById('text-input');
+            const sendButton = document.getElementById('send-button');
+            
+            // Obsługa przycisku Wyślij
+            sendButton.addEventListener('click', () => {
+                sendText();
+            });
+            
+            // Obsługa naciśnięcia Enter w polu tekstowym
+            textInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    sendText();
                 }
-                
-                mediaRecorder = new MediaRecorder(microphoneStream, { mimeType });
-                
-                // Nasłuchuj zdarzenia dataavailable, aby zbierać chunki audio
-                mediaRecorder.addEventListener('dataavailable', event => {
-                    if (event.data.size > 0) {
-                        audioChunks.push(event.data);
-                    }
-                });
-                
-                // Rozpocznij nagrywanie
-                mediaRecorder.start();
-                isRecording = true;
-                recordingId++;
-                
-                // Aktualizuj interfejs
-                recordButton.classList.add('recording');
-                statusMessage.textContent = 'Nagrywanie... Puść przycisk, aby zatrzymać.';
-            }
-        } catch (error) {
-            console.error('Błąd podczas rozpoczynania nagrywania:', error);
-            showMessage('Nie można uzyskać dostępu do mikrofonu: ' + error.message, 'error');
+            });
+            
+            // Dodaj style CSS do nowego interfejsu
+            const style = document.createElement('style');
+            style.textContent = `
+                .text-interface {
+                    width: 100%;
+                    margin-top: 20px;
+                }
+                .form-group {
+                    display: flex;
+                    gap: 10px;
+                }
+                .text-input {
+                    flex: 1;
+                    padding: 12px;
+                    border-radius: 20px;
+                    border: 1px solid #ccc;
+                    font-size: 16px;
+                }
+                #send-button {
+                    background-color: var(--primary-color);
+                    color: white;
+                    border: none;
+                    border-radius: 50%;
+                    width: 46px;
+                    height: 46px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    transition: all 0.3s ease;
+                }
+                #send-button:hover {
+                    background-color: var(--secondary-color);
+                }
+            `;
+            document.head.appendChild(style);
         }
+        
+        // Aktualizuj status
+        statusMessage.textContent = 'Gotowy do wysyłania wiadomości';
     }
     
-    // Funkcja zatrzymująca nagrywanie
-    async function stopRecording() {
-        if (isRecording && mediaRecorder) {
-            try {
-                // Zatrzymaj nagrywanie
-                mediaRecorder.stop();
-                isRecording = false;
-                
-                // Aktualizuj interfejs
-                recordButton.classList.remove('recording');
-                statusMessage.textContent = 'Przetwarzanie nagrania...';
-                
-                // Zaczekaj na zakończenie nagrywania i przetwórz je
-                setTimeout(() => {
-                    const entryId = `entry-${recordingId}`;
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                    if (audioBlob.size > 0) {
-                        processRecording(audioBlob, entryId);
-                    } else {
-                        statusMessage.textContent = 'Gotowy do nagrywania';
-                        showMessage('Nagranie jest puste', 'error');
-                    }
-                    
-                    // Zamknij strumień mikrofonu
-                    if (microphoneStream) {
-                        microphoneStream.getTracks().forEach(track => track.stop());
-                        microphoneStream = null;
-                    }
-                }, 500);
-            } catch (error) {
-                console.error('Błąd podczas zatrzymywania nagrywania:', error);
-                statusMessage.textContent = 'Gotowy do nagrywania';
-                showMessage('Błąd podczas zatrzymywania nagrywania: ' + error.message, 'error');
-            }
+    // Funkcja wysyłająca tekst do API
+    async function sendText() {
+        const textInput = document.getElementById('text-input');
+        const text = textInput.value.trim();
+        
+        if (!text) {
+            return;
         }
-    }
-    
-    // Przetwarzanie nagrania
-    async function processRecording(audioBlob, entryId) {
+        
+        // Sprawdź, czy URL webhooka jest ustawiony
+        const webhookUrl = localStorage.getItem('webhookUrl');
+        if (!webhookUrl) {
+            showMessage('Proszę najpierw ustawić adres URL webhooka N8N w ustawieniach', 'error');
+            return;
+        }
+        
+        // Wyczyść pole tekstowe
+        textInput.value = '';
+        
+        // Utwórz identyfikator wpisu
+        const entryId = `entry-${Date.now()}`;
+        
+        // Dodaj wpis do konwersacji
+        addConversationEntry(entryId);
+        
+        // Aktualizuj wpis konwersacji od razu (bez czekania na API)
+        updateConversationEntryWithTranscription(entryId, text);
+        
         try {
-            const webhookUrl = localStorage.getItem('webhookUrl');
+            // Wyślij tekst bezpośrednio do webhooka
+            statusMessage.textContent = 'Wysyłanie wiadomości...';
             
-            // Dodaj wpis konwersacji
-            addConversationEntry(entryId);
-            
-            // Utwórz FormData do wysłania pliku audio
-            const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.webm');
-            formData.append('webhook_url', webhookUrl);
-            
-            // Wyślij plik do backendu
-            const response = await fetch('/api/transcribe', {
+            const response = await fetch('/api/text-message', {
                 method: 'POST',
-                body: formData
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text: text,
+                    webhook_url: webhookUrl
+                })
             });
             
             if (!response.ok) {
-                let errorMessage = 'Transkrypcja nie powiodła się';
+                let errorMessage = 'Nie udało się wysłać wiadomości';
                 try {
                     const errorData = await response.json();
                     errorMessage = errorData.detail || errorMessage;
@@ -157,9 +163,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             const data = await response.json();
-            
-            // Aktualizuj wpis konwersacji transkrypcją
-            updateConversationEntryWithTranscription(entryId, data.text);
             
             // Obsłuż odpowiedź n8n
             if (data.n8nResponse && data.n8nResponse.text) {
@@ -183,13 +186,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             
-            // Aktualizuj status
-            statusMessage.textContent = 'Gotowy do nagrywania';
+            statusMessage.textContent = 'Gotowy do wysyłania wiadomości';
             
         } catch (error) {
-            console.error('Błąd przetwarzania nagrania:', error);
+            console.error('Błąd wysyłania wiadomości:', error);
             updateConversationEntryWithError(entryId, error.message);
-            statusMessage.textContent = 'Gotowy do nagrywania';
+            statusMessage.textContent = 'Gotowy do wysyłania wiadomości';
         }
     }
     
@@ -348,7 +350,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 5000);
     }
     
-    // Inicjalizacja statusu
-    statusMessage.textContent = 'Gotowy do nagrywania';
-    showMessage('Naciśnij i przytrzymaj przycisk mikrofonu, aby nagrywać', 'success');
+    // Inicjalizacja z informacją
+    showMessage('Interfejs tekstowy aktywny - wpisz wiadomość i naciśnij Enter, aby wysłać', 'success');
 });
