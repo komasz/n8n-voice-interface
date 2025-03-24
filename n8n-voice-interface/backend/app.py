@@ -1,14 +1,12 @@
 import logging
 import os
 import json
-import base64
-from typing import Optional
-from fastapi import FastAPI, UploadFile, Form, HTTPException, BackgroundTasks, Request, Response, Cookie
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+from typing import Dict, Any
+from fastapi import FastAPI, UploadFile, Form, HTTPException, BackgroundTasks, Request, Response, Cookie, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import uvicorn
 
 from backend.stt import transcribe_audio
 from backend.webhook import send_to_n8n
@@ -21,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Inicjalizacja aplikacji FastAPI
+# Inicjalizacja FastAPI
 app = FastAPI(
     title="N8N Voice Interface",
     description="Interfejs głosowy dla n8n wykorzystujący OpenAI's GPT-4o Transcribe",
@@ -37,18 +35,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Przechowuj ostatnią odpowiedź n8n do pobrania
+# Przechowuj ostatnią odpowiedź n8n i ścieżkę pliku TTS
 last_n8n_response = None
 last_tts_file_path = None
 
-# Model do odbierania tekstu z n8n
+# Model dla odbierania tekstu z n8n
 class TextRequest(BaseModel):
     text: str
 
-# Model odpowiedzi dla tekstu i audio
-class AudioTextResponse(BaseModel):
+# Nowy model dla żądań tekstowych
+class TextMessageRequest(BaseModel):
     text: str
-    audio_url: str
+    webhook_url: str
+
+# NOWY ENDPOINT: Endpoint do obsługi wiadomości tekstowych
+@app.post("/api/text-message")
+async def text_message_endpoint(
+    request: TextMessageRequest,
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Przetwarza wiadomość tekstową i wysyła ją do N8N webhook.
+    
+    Args:
+        request: Obiekt zawierający tekst i URL webhooka
+        background_tasks: Zadania w tle
+    
+    Returns:
+        Odpowiedź JSON z wiadomością i odpowiedzią n8n
+    """
+    global last_n8n_response
+    
+    try:
+        text = request.text
+        webhook_url = request.webhook_url
+        
+        logger.info(f"Otrzymano wiadomość tekstową: {text[:50]}...")
+        
+        # Wyślij do webhooka n8n 
+        n8n_response = await send_to_n8n(webhook_url, {"transcription": text})
+        
+        # Zapisz odpowiedź n8n globalnie
+        if isinstance(n8n_response, dict) and "text" in n8n_response:
+            last_n8n_response = n8n_response
+            logger.info(f"Zapisano odpowiedź n8n: {n8n_response['text'][:50]}...")
+            
+            # Generuj TTS dla odpowiedzi w tle
+            if background_tasks:
+                background_tasks.add_task(
+                    generate_tts_for_response,
+                    n8n_response["text"]
+                )
+            else:
+                await generate_tts_for_response(n8n_response["text"])
+                
+            # Zwróć zarówno wiadomość, jak i odpowiedź n8n
+            return {
+                "success": True,
+                "text": text,
+                "n8nResponse": n8n_response
+            }
+        
+        return {
+            "success": True,
+            "text": text
+        }
+    
+    except Exception as e:
+        logger.error(f"Błąd przetwarzania żądania tekstowego: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Endpoint API dla transkrypcji
 @app.post("/api/transcribe")
@@ -133,7 +188,7 @@ async def get_n8n_response():
     
     return last_n8n_response
 
-# Zmodyfikowany endpoint do pobierania ostatniego pliku TTS z tekstem w treści odpowiedzi, nie w nagłówku
+# Endpoint do pobierania ostatniego pliku TTS z tekstem w treści odpowiedzi
 @app.get("/api/last-response-tts")
 async def get_last_response_tts():
     """
@@ -210,7 +265,7 @@ async def speak_endpoint(request: TextRequest):
         # Utwórz unikalny URL audio z ścieżki pliku
         audio_url = f"/api/audio/{os.path.basename(audio_path)}"
         
-        # Zwróć JSON z tekstem i URL audio zamiast FileResponse
+        # Zwróć JSON z tekstem i URL audio
         return {
             "text": text,
             "audio_url": audio_url
@@ -218,76 +273,6 @@ async def speak_endpoint(request: TextRequest):
     
     except Exception as e:
         logger.error(f"Błąd przetwarzania żądania speak: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Webhook endpoint, który może obsługiwać zarówno odbieranie tekstu z n8n, jak i wysyłanie transkrypcji do n8n
-@app.post("/api/webhook/{webhook_id}")
-async def webhook_endpoint(
-    webhook_id: str,
-    request: Request,
-    background_tasks: BackgroundTasks
-):
-    """
-    Dwukierunkowy endpoint webhooka dla integracji n8n.
-    Może odbierać tekst z n8n i zwracać audio lub odbierać audio i wysyłać tekst do n8n.
-    """
-    global last_n8n_response, last_tts_file_path
-    content_type = request.headers.get("content-type", "")
-    
-    try:
-        if "multipart/form-data" in content_type:
-            # To jest upload audio z frontendu
-            form_data = await request.form()
-            audio = form_data.get("audio")
-            webhook_url = form_data.get("webhook_url")
-            
-            if not audio or not webhook_url:
-                raise HTTPException(status_code=400, detail="Brak audio lub webhook_url")
-            
-            # Przetwórz jako upload audio (podobnie jak transcribe_endpoint)
-            transcription_result = await transcribe_audio(audio)
-            transcribed_text = transcription_result["text"]
-            
-            # Wyślij do webhooka n8n
-            n8n_response = await send_to_n8n(webhook_url, {"transcription": transcribed_text})
-            
-            # Zapisz odpowiedź globalnie
-            if isinstance(n8n_response, dict) and "text" in n8n_response:
-                last_n8n_response = n8n_response
-            
-            return {
-                "success": True,
-                "text": transcribed_text,
-                "n8nResponse": n8n_response if isinstance(n8n_response, dict) else None
-            }
-            
-        else:
-            # To jest odpowiedź tekstowa z n8n
-            body = await request.json()
-            
-            if "text" not in body:
-                raise HTTPException(status_code=400, detail="Brak pola 'text' w ciele żądania")
-            
-            # Zapisz jako ostatnią odpowiedź n8n
-            last_n8n_response = {"text": body["text"]}
-            
-            # Konwertuj tekst na mowę
-            audio_path = await text_to_speech(body["text"])
-            
-            # Zapisz ścieżkę pliku TTS
-            last_tts_file_path = audio_path
-            
-            # Utwórz unikalny URL audio z ścieżki pliku
-            audio_url = f"/api/audio/{os.path.basename(audio_path)}"
-            
-            # Zwróć JSON z tekstem i URL audio
-            return {
-                "text": body["text"],
-                "audio_url": audio_url
-            }
-    
-    except Exception as e:
-        logger.error(f"Błąd przetwarzania żądania webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # Endpoint sprawdzania stanu
@@ -303,5 +288,6 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 # Uruchom aplikację
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
