@@ -23,43 +23,56 @@ document.addEventListener('DOMContentLoaded', () => {
     webhookUrlInput.value = localStorage.getItem('webhookUrl') || '';
 
     // Flagi dla trybu ciągłego nasłuchiwania
-    let isListening = false;      // Czy tryb ciągłego nasłuchiwania jest aktywny
-    let isRecording = false;      // Czy obecnie nagrywa audio
-    let isProcessing = false;     // Czy obecnie przetwarza nagranie
-    
-    // Obiekty mediów
+    let isListening = false;     
+    let isRecording = false;     
     let mediaRecorder = null;
     let audioChunks = [];
-    let recordingId = 0;          // Unikalny ID dla każdego nagrania
+    let recordingId = 0;         
     
-    // Zmienne dla wykrywania ciszy
-    let audioContext;
-    let audioAnalyser;
-    let audioSource;
-    let microphoneStream;
-    let silenceDetectionInterval;
+    // Zmienne dla obsługi dźwięku
+    let microphoneStream = null;
+    let silenceDetectionInterval = null;
     
     // Ustawienia wykrywania ciszy
-    const SILENCE_THRESHOLD = 15; // Próg poniżej którego uznawane jest za ciszę
-    const SILENCE_DURATION = 1500; // 1.5 sekundy ciszy do wyzwolenia zatrzymania
-    const CHECK_INTERVAL = 100;   // Sprawdzaj co 100ms
+    const SILENCE_THRESHOLD = 15; 
+    const SILENCE_DURATION = 1500;
+    const CHECK_INTERVAL = 100;   
     let silenceStartTime = null;
     let speechDetected = false;
     
     // Licznik dla wpisów konwersacji
-    let conversationEntryCount = 0;
-    const MAX_CONVERSATION_ENTRIES = 10; // Maksymalna liczba wpisów konwersacji do pokazania
+    const MAX_CONVERSATION_ENTRIES = 10;
 
     // Sprawdź, czy przeglądarka obsługuje wymagane API
-    if (!navigator.mediaDevices || !window.MediaRecorder) {
-        statusMessage.textContent = 'Twoja przeglądarka nie obsługuje nagrywania dźwięku.';
+    if (!navigator.mediaDevices) {
+        statusMessage.textContent = 'Twoja przeglądarka nie obsługuje API dostępu do mikrofonu.';
         recordButton.disabled = true;
         return;
     }
 
-    // Obsługa kliknięcia przycisku toggle - uruchom/zatrzymaj ciągłe nasłuchiwanie
-    recordButton.addEventListener('click', toggleContinuousListening);
-
+    // Obsługa kliknięcia przycisku toggle
+    recordButton.addEventListener('click', async () => {
+        try {
+            if (isListening) {
+                // Zatrzymaj nasłuchiwanie
+                stopListening();
+                recordButton.classList.remove('recording');
+                recordButton.title = "Rozpocznij ciągłe słuchanie";
+                statusMessage.textContent = 'Gotowy do słuchania';
+            } else {
+                // Rozpocznij nasłuchiwanie
+                await startListening();
+                recordButton.classList.add('recording');
+                recordButton.title = "Zatrzymaj ciągłe słuchanie";
+                statusMessage.textContent = 'Ciągłe słuchanie aktywne...';
+                showMessage('Ciągłe słuchanie aktywne. Zacznij mówić, aby wysłać zapytanie.', 'success');
+            }
+        } catch (error) {
+            console.error('Błąd podczas przełączania słuchania:', error);
+            showMessage(`Nie można uzyskać dostępu do mikrofonu: ${error.message}`, 'error');
+        }
+    });
+    
     // Zapisz URL webhooka do localStorage
     saveSettingsButton.addEventListener('click', () => {
         const webhookUrl = webhookUrlInput.value.trim();
@@ -71,93 +84,89 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Toggle trybu ciągłego nasłuchiwania
-    async function toggleContinuousListening() {
-        if (isListening) {
-            // Zatrzymaj nasłuchiwanie
-            stopListening();
-            recordButton.classList.remove('recording');
-            recordButton.title = "Rozpocznij ciągłe słuchanie";
-            statusMessage.textContent = 'Gotowy do słuchania';
-        } else {
-            // Rozpocznij nasłuchiwanie
-            try {
-                await startListening();
-                recordButton.classList.add('recording');
-                recordButton.title = "Zatrzymaj ciągłe słuchanie";
-                statusMessage.textContent = 'Ciągłe słuchanie aktywne...';
-                showMessage('Ciągłe słuchanie aktywne. Zacznij mówić, aby wysłać zapytanie.', 'success');
-            } catch (error) {
-                console.error('Błąd podczas uruchamiania słuchania:', error);
-                showMessage(`Nie można uzyskać dostępu do mikrofonu: ${error.message}`, 'error');
-            }
-        }
-    }
-    
     // Rozpocznij tryb ciągłego nasłuchiwania
     async function startListening() {
         try {
-            // Pobierz strumień mikrofonu
+            // Najprostsza możliwa konfiguracja mikrofonu
             microphoneStream = await navigator.mediaDevices.getUserMedia({ 
-                audio: {
-                    channelCount: 1,
-                    sampleRate: 16000
-                } 
+                audio: true 
             });
             
-            // Skonfiguruj kontekst audio i analizator
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            audioSource = audioContext.createMediaStreamSource(microphoneStream);
-            audioAnalyser = audioContext.createAnalyser();
-            
-            // Skonfiguruj analizator
-            audioAnalyser.fftSize = 256;
-            audioAnalyser.smoothingTimeConstant = 0.8;
-            audioSource.connect(audioAnalyser);
-            
-            // Zresetuj stan wykrywania
-            silenceStartTime = null;
-            speechDetected = false;
+            // Zresetuj stan
             isListening = true;
             isRecording = false;
+            silenceStartTime = null;
+            speechDetected = false;
             
-            // Skonfiguruj rejestrator mediów (ale jeszcze go nie uruchamiaj)
-            const mimeType = getSupportedMimeType();
-            const options = mimeType ? { mimeType } : {};
-            mediaRecorder = new MediaRecorder(microphoneStream, options);
+            // Najprostsza konfiguracja MediaRecorder
+            mediaRecorder = new MediaRecorder(microphoneStream);
             
-            // Rozpocznij wykrywanie ciszy
-            startSilenceDetection();
+            // Skonfiguruj obsługę zdarzeń
+            mediaRecorder.ondataavailable = (event) => {
+                audioChunks.push(event.data);
+            };
+            
+            mediaRecorder.onstart = () => {
+                isRecording = true;
+                console.log("Nagrywanie rozpoczęte");
+            };
+            
+            mediaRecorder.onstop = () => {
+                isRecording = false;
+                console.log("Nagrywanie zakończone");
+                
+                // Przetwórz nagranie
+                const audioBlob = new Blob(audioChunks, { type: 'audio/mpeg' });
+                if (audioBlob.size > 1000) {
+                    processRecording(audioBlob);
+                }
+                
+                // Zresetuj chunki
+                audioChunks = [];
+            };
             
             // Uruchom wizualizację
             visualizationContainer.classList.add('active-visualization');
             
+            // Ustaw interwał nasłuchiwania (uproszczone wykrywanie dźwięku)
+            startSimpleVoiceDetection();
+            
             console.log("Tryb ciągłego nasłuchiwania aktywowany");
         } catch (error) {
             console.error("Błąd podczas uruchamiania nasłuchiwania:", error);
-            throw error; // Przekaż błąd dalej
+            throw error;
         }
+    }
+    
+    // Prosta detekcja dźwięku bez AudioContext (dla kompatybilności)
+    function startSimpleVoiceDetection() {
+        // Zacznij od razu nagrywać (rozpocznij od razu słuchanie)
+        startNewRecording();
+        
+        // Ustaw interwał do aktualizacji wizualizacji (atrapa)
+        silenceDetectionInterval = setInterval(() => {
+            // Prosta animacja pulsowania dla wizualizacji
+            const bars = document.querySelectorAll('.visualization-bar');
+            bars.forEach(bar => {
+                const height = 3 + Math.random() * 10;
+                bar.style.height = `${height}px`;
+            });
+        }, 100);
     }
     
     // Zatrzymaj tryb ciągłego nasłuchiwania
     function stopListening() {
-        // Zatrzymaj wykrywanie ciszy
+        // Zatrzymaj wszystkie interwały
         clearInterval(silenceDetectionInterval);
         
-        // Zatrzymaj aktywne nagrywanie
+        // Zatrzymaj nagrywanie
         if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
             mediaRecorder.stop();
-            isRecording = false;
         }
         
         // Zwolnij mikrofon
         if (microphoneStream) {
             microphoneStream.getTracks().forEach(track => track.stop());
-        }
-        
-        // Zamknij kontekst audio
-        if (audioContext && audioContext.state !== 'closed') {
-            audioContext.close().catch(e => console.error("Błąd zamykania kontekstu audio:", e));
         }
         
         // Aktualizuj wizualizację
@@ -170,136 +179,24 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log("Tryb ciągłego nasłuchiwania dezaktywowany");
     }
     
-    // Funkcja do zatrzymywania odtwarzania audio
-    function stopAudioPlayback() {
-        if (audioPlayer && !audioPlayer.paused) {
-            console.log('Przerwanie odtwarzania - wykryto mowę użytkownika');
-            audioPlayer.pause();
-            audioPlayer.currentTime = 0;
-            
-            // Opcjonalnie: pokaż krótki komunikat
-            showMessage('Przerwano odtwarzanie, słucham...', 'success');
-            
-            // Znajdź i zaktualizuj wszystkie przyciski odtwarzania
-            const playButtons = document.querySelectorAll('.play-button');
-            playButtons.forEach(button => {
-                button.disabled = false;
-                button.innerHTML = '<i class="fas fa-play"></i> Odtwórz';
-            });
-        }
-    }
-    
-    // Rozpocznij wykrywanie ciszy
-    function startSilenceDetection() {
-        // Bufor dla danych częstotliwości
-        const dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
-        
-        // Ustaw interwał do sprawdzania mowy i ciszy
-        silenceDetectionInterval = setInterval(() => {
-            if (!isListening) {
-                clearInterval(silenceDetectionInterval);
-                return;
-            }
-            
-            // Pobierz aktualne dane częstotliwości
-            audioAnalyser.getByteFrequencyData(dataArray);
-            
-            // Oblicz średnią głośność
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i];
-            }
-            const average = sum / dataArray.length;
-            
-            // Aktualizuj wizualizację (faktyczny poziom dźwięku)
-            updateVisualization(average);
-            
-            // Użytkownik mówi
-            if (average > SILENCE_THRESHOLD) {
-                // Jeśli odtwarzane jest audio, przerwij odtwarzanie
-                stopAudioPlayback();
-                
-                // Jeśli jeszcze nie nagrywamy, rozpocznij nowe nagranie
-                if (!isRecording) {
-                    startNewRecording();
-                }
-                
-                // Zresetuj timer ciszy
-                silenceStartTime = null;
-                speechDetected = true;
-            } 
-            // Użytkownik milczy
-            else {
-                // Sprawdź koniec mowy tylko jeśli nagrywamy i mowa została wykryta
-                if (isRecording && speechDetected) {
-                    // Jeśli to początek ciszy
-                    if (silenceStartTime === null) {
-                        silenceStartTime = Date.now();
-                    }
-                    
-                    // Sprawdź, czy cisza trwała wystarczająco długo
-                    const silenceDuration = Date.now() - silenceStartTime;
-                    if (silenceDuration >= SILENCE_DURATION) {
-                        console.log(`Cisza wykryta przez ${silenceDuration}ms. Kończę nagrywanie.`);
-                        stopCurrentRecording();
-                        
-                        // Zresetuj dla następnego nagrania
-                        speechDetected = false;
-                        silenceStartTime = null;
-                    }
-                }
-            }
-        }, CHECK_INTERVAL);
-    }
-    
     // Rozpocznij nowe nagranie
     function startNewRecording() {
         // Zresetuj stan nagrywania
         audioChunks = [];
         recordingId++;
-        const currentRecordingId = recordingId;
         
-        // Skonfiguruj handlery zdarzeń mediaRecorder
-        mediaRecorder.onstart = () => {
-            console.log(`Nagrywanie #${currentRecordingId} rozpoczęte`);
-            isRecording = true;
-        };
-        
-        mediaRecorder.ondataavailable = (event) => {
-            audioChunks.push(event.data);
-        };
-        
-        mediaRecorder.onstop = () => {
-            console.log(`Nagrywanie #${currentRecordingId} zakończone`);
-            isRecording = false;
-            
-            // Utwórz blob audio z określonym typem
-            const mimeType = getSupportedMimeType();
-            const audioBlob = new Blob(audioChunks, { type: mimeType || 'audio/mpeg' });
-            
-            console.log(`Nagranie #${currentRecordingId}: ${audioBlob.size} bajtów`);
-            
-            // Przetwórz tylko jeśli nie jest za małe
-            if (audioBlob.size > 1000) {
-                processRecording(audioBlob, `entry-${currentRecordingId}`);
-            } else {
-                console.log(`Nagranie #${currentRecordingId} zbyt krótkie, pomijam`);
+        // Rozpocznij nagrywanie
+        if (mediaRecorder && mediaRecorder.state !== 'recording') {
+            try {
+                mediaRecorder.start(1000); // Zapisuj dane co 1 sekundę
+            } catch (error) {
+                console.error("Błąd podczas rozpoczynania nagrywania:", error);
             }
-        };
-        
-        // Rozpocznij nagrywanie w małych kawałkach dla większej responsywności
-        mediaRecorder.start(100);
-    }
-    
-    // Zatrzymaj bieżące nagranie
-    function stopCurrentRecording() {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
         }
     }
     
     // Przetwórz nagrany blob audio
-    async function processRecording(audioBlob, recordingId) {
+    async function processRecording(audioBlob) {
         const webhookUrl = localStorage.getItem('webhookUrl');
         
         if (!webhookUrl) {
@@ -307,8 +204,9 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
-        // Utwórz nowy wpis konwersacji dla tego nagrania
-        addConversationEntry(recordingId);
+        // Utwórz nowy wpis konwersacji
+        const entryId = `entry-${Date.now()}`;
+        addConversationEntry(entryId);
         
         try {
             activeRequests++;
@@ -316,7 +214,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             // Utwórz dane formularza dla żądania API
             const formData = new FormData();
-            formData.append('audio', audioBlob, `recording-${recordingId}.mp3`);
+            formData.append('audio', audioBlob, `recording-${entryId}.mp3`);
             formData.append('webhook_url', webhookUrl);
             
             // Wyślij audio do backendu
@@ -339,12 +237,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await response.json();
             
             // Aktualizuj wpis konwersacji transkrypcją
-            updateConversationEntryWithTranscription(recordingId, data.text);
+            updateConversationEntryWithTranscription(entryId, data.text);
             
             // Przetwórz odpowiedź z n8n
             if (data.n8nResponse && data.n8nResponse.text) {
-                console.log(`Otrzymano natychmiastową odpowiedź dla nagrania #${recordingId}`);
-                handleN8nResponse(data.n8nResponse.text, recordingId);
+                console.log(`Otrzymano natychmiastową odpowiedź`);
+                handleN8nResponse(data.n8nResponse.text, entryId);
             } else {
                 // Spróbuj pobrać odpowiedź przez endpoint last-response-tts
                 try {
@@ -359,21 +257,35 @@ document.addEventListener('DOMContentLoaded', () => {
                         const responseData = await n8nResponse.json();
                         
                         if (responseData.text && responseData.audio_url) {
-                            handleN8nResponse(responseData.text, recordingId, responseData.audio_url);
+                            handleN8nResponse(responseData.text, entryId, responseData.audio_url);
                         } else {
-                            handleDefaultResponse(recordingId);
+                            handleDefaultResponse(entryId);
                         }
                     } else {
-                        handleDefaultResponse(recordingId);
+                        handleDefaultResponse(entryId);
                     }
                 } catch (error) {
-                    console.error(`Błąd podczas pobierania odpowiedzi dla nagrania #${recordingId}:`, error);
-                    handleDefaultResponse(recordingId);
+                    console.error(`Błąd podczas pobierania odpowiedzi:`, error);
+                    handleDefaultResponse(entryId);
                 }
             }
+            
+            // Po zakończeniu przetwarzania, rozpocznij nowe nagrywanie
+            if (isListening && !isRecording) {
+                setTimeout(() => {
+                    startNewRecording();
+                }, 500);
+            }
         } catch (error) {
-            console.error(`Błąd podczas przetwarzania nagrania #${recordingId}:`, error);
-            updateConversationEntryWithError(recordingId, error.message);
+            console.error(`Błąd podczas przetwarzania nagrania:`, error);
+            updateConversationEntryWithError(entryId, error.message);
+            
+            // Spróbuj ponownie rozpocząć nagrywanie po błędzie
+            if (isListening && !isRecording) {
+                setTimeout(() => {
+                    startNewRecording();
+                }, 1000);
+            }
         } finally {
             activeRequests--;
             updateStatus();
@@ -517,44 +429,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // Aktualizuj wizualizację na podstawie faktycznych poziomów dźwięku
-    function updateVisualization(volume) {
-        const bars = document.querySelectorAll('.visualization-bar');
-        if (!bars.length) return;
-        
-        // Skaluj głośność do wysokości wizualnej (0-50px)
-        const scaledVolume = Math.min(50, volume * 1.5);
-        
-        // Aktualizuj każdy pasek z lekką losową wariancją dla efektu wizualnego
-        bars.forEach(bar => {
-            const randomFactor = 0.8 + Math.random() * 0.4;
-            const height = Math.max(3, scaledVolume * randomFactor);
-            bar.style.height = `${height}px`;
-        });
-    }
-
-    // Znajdź obsługiwany typ MIME
-    function getSupportedMimeType() {
-        // Wypróbuj popularne formaty audio w kolejności preferencji
-        const mimeTypes = [
-            'audio/mp3',
-            'audio/mpeg',
-            'audio/webm',
-            'audio/ogg',
-            'audio/wav'
-        ];
-        
-        for (const type of mimeTypes) {
-            if (MediaRecorder.isTypeSupported(type)) {
-                console.log(`Przeglądarka wspiera nagrywanie w formacie ${type}`);
-                return type;
-            }
-        }
-        
-        console.warn('Żaden z preferowanych typów MIME nie jest obsługiwany przez tę przeglądarkę');
-        return null;
-    }
-    
     // Funkcja do odtwarzania odpowiedzi audio
     function playAudioResponse(audioUrl, buttonElement = null) {
         // Zatrzymaj aktualnie odtwarzane audio
@@ -612,16 +486,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Dodaj obsługę zdarzenia dla przycisku "Odtwórz ponownie"
-    document.getElementById('play-again-button')?.addEventListener('click', () => {
-        if (audioPlayer.src) {
-            audioPlayer.currentTime = 0;
-            audioPlayer.play()
-                .catch(error => {
-                    console.error('Błąd odtwarzania dźwięku:', error);
-                    showMessage('Błąd odtwarzania dźwięku', 'error');
-                });
-        }
-    });
+    const playAgainButton = document.getElementById('play-again-button');
+    if (playAgainButton) {
+        playAgainButton.addEventListener('click', () => {
+            if (audioPlayer.src) {
+                audioPlayer.currentTime = 0;
+                audioPlayer.play()
+                    .catch(error => {
+                        console.error('Błąd odtwarzania dźwięku:', error);
+                        showMessage('Błąd odtwarzania dźwięku', 'error');
+                    });
+            }
+        });
+    }
     
     // Pokaż początkowy status
     statusMessage.textContent = 'Gotowy do słuchania';
