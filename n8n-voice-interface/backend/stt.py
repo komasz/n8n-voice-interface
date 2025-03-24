@@ -47,56 +47,57 @@ async def transcribe_audio(audio_file: UploadFile) -> Dict[str, Any]:
 
         logger.info(f"Zapisano audio do pliku tymczasowego: {temp_file_path}")
 
+        # KLUCZOWA ZMIANA: Odczytaj zawartość pliku zanim zaczniemy wysyłanie
+        with open(temp_file_path, "rb") as file:
+            file_content = file.read()
+
         # Przygotuj nagłówki żądania
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}"
         }
 
-        # Przygotuj plik i dane formularza
-        try:
-            async with aiohttp.ClientSession() as session:
-                form = aiohttp.FormData()
-                with open(temp_file_path, "rb") as file:
-                    form.add_field(
-                        'file', 
-                        file, 
-                        filename=os.path.basename(temp_file_path),
-                        content_type='audio/mpeg'
-                    )
-                    form.add_field('model', STT_MODEL)
-                    form.add_field('language', 'pl')  # Wymuś rozpoznawanie języka polskiego
+        # Przygotuj dane formularza z zawartością pliku (nie referencją)
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field(
+                'file', 
+                file_content,  # Używamy odczytanej zawartości, a nie referencji do pliku
+                filename=os.path.basename(temp_file_path),
+                content_type='audio/mpeg'
+            )
+            form.add_field('model', STT_MODEL)
+            form.add_field('language', 'pl')  # Wymuś rozpoznawanie języka polskiego
+            
+            # Wyślij żądanie API
+            logger.info(f"Wysyłanie żądania do API OpenAI używając modelu: {STT_MODEL} z językiem: pl")
+            async with session.post(API_URL, headers=headers, data=form) as response:
+                # Teraz możemy bezpiecznie wyczyścić plik, bo jego zawartość jest już w pamięci
+                try:
+                    os.remove(temp_file_path)
+                    logger.info(f"Usunięto plik tymczasowy: {temp_file_path}")
+                except Exception as e:
+                    logger.warning(f"Nie udało się usunąć pliku tymczasowego: {str(e)}")
                 
-                # Wyślij żądanie API
-                logger.info(f"Wysyłanie żądania do API OpenAI używając modelu: {STT_MODEL} z językiem: pl")
-                async with session.post(API_URL, headers=headers, data=form) as response:
-                    # Sprawdź, czy wystąpiły błędy
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Błąd API OpenAI: {response.status} - {error_text}")
+                # Sprawdź, czy wystąpiły błędy
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Błąd API OpenAI: {response.status} - {error_text}")
 
-                        # Próba analizy błędu
-                        error_msg = "Transkrypcja nie powiodła się"
-                        try:
-                            error_data = await response.json()
-                            if "error" in error_data and "message" in error_data["error"]:
-                                error_msg = error_data["error"]["message"]
-                        except:
-                            pass
+                    # Próba analizy błędu
+                    error_msg = "Transkrypcja nie powiodła się"
+                    try:
+                        error_data = await response.json()
+                        if "error" in error_data and "message" in error_data["error"]:
+                            error_msg = error_data["error"]["message"]
+                    except:
+                        pass
 
-                        raise HTTPException(status_code=500, detail=error_msg)
+                    raise HTTPException(status_code=500, detail=error_msg)
 
-                    # Sparsuj odpowiedź
-                    result = await response.json()
-                    logger.info(f"Transkrypcja zakończona pomyślnie: {result.get('text', '')[:50]}...")
-                    return result
-
-        finally:
-            # Wyczyść plik tymczasowy
-            try:
-                os.remove(temp_file_path)
-                logger.info(f"Usunięto plik tymczasowy: {temp_file_path}")
-            except Exception as e:
-                logger.warning(f"Nie udało się usunąć pliku tymczasowego: {str(e)}")
+                # Sparsuj odpowiedź
+                result = await response.json()
+                logger.info(f"Transkrypcja zakończona pomyślnie: {result.get('text', '')[:50]}...")
+                return result
 
     except Exception as e:
         if isinstance(e, HTTPException):
