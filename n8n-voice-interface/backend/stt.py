@@ -1,102 +1,86 @@
 import os
 import logging
-import uuid
-import tempfile
 import requests
+import tempfile
+import uuid
 from fastapi import UploadFile, HTTPException
 
-# Configure logging
+# Konfiguracja loggera
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants
+# Stałe konfiguracyjne
 STT_MODEL = os.getenv("STT_MODEL", "whisper-1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 API_URL = "https://api.openai.com/v1/audio/transcriptions"
 
 async def transcribe_audio(audio_file: UploadFile) -> dict:
     """
-    Transcribe audio using OpenAI's API.
+    Transkrybuje dźwięk używając API OpenAI.
     
     Args:
-        audio_file: The uploaded audio file
-    
+        audio_file: Przesłany plik dźwiękowy
+        
     Returns:
-        A dictionary containing the transcription text
+        Słownik zawierający transkrypcję tekstową
     """
+    # Sprawdź klucz API
     if not OPENAI_API_KEY:
-        logger.error("OpenAI API key not found in environment")
-        raise HTTPException(
-            status_code=500, 
-            detail="OPENAI_API_KEY environment variable not set"
-        )
-    logger.info("OpenAI API key found in environment")
-
+        logger.error("Brak klucza API OpenAI w zmiennych środowiskowych")
+        raise HTTPException(status_code=500, detail="Brak klucza API OpenAI (OPENAI_API_KEY)")
+    
+    # Zapisz plik tymczasowo
+    temp_dir = tempfile.gettempdir()
+    temp_file_path = os.path.join(temp_dir, f"audio_{uuid.uuid4()}.webm")
+    
     try:
-        # Save the uploaded file to a temporary location
-        temp_dir = tempfile.gettempdir()
-        temp_file_path = os.path.join(temp_dir, f"{uuid.uuid4()}_{audio_file.filename}")
-
+        # Zapisz przesłany plik
         with open(temp_file_path, "wb") as temp_file:
-            # Read the file in chunks
             content = await audio_file.read()
             temp_file.write(content)
-
-        logger.info(f"Saved audio to temporary file: {temp_file_path}")
-
-        # Set up the request headers
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
-        }
-
-        # Prepare the file and form data
-        with open(temp_file_path, "rb") as file:
-            # Set explicit MIME type to audio/mpeg as a safe default
+        
+        logger.info(f"Zapisano plik audio do: {temp_file_path}")
+        
+        # Konfiguracja żądania API
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        
+        with open(temp_file_path, "rb") as audio:
             files = {
-                "file": (os.path.basename(temp_file_path), file, "audio/mpeg"),
+                "file": ("audio.webm", audio, "audio/webm"),
                 "model": (None, STT_MODEL),
-                "language": (None, "pl")  # Force Polish language recognition
+                "language": (None, "pl")
             }
             
-            # Make the API request
-            logger.info(f"Sending request to OpenAI API using model: {STT_MODEL} with language: pl")
-            response = requests.post(
-                API_URL,
-                headers=headers,
-                files=files
-            )
-
-        # Clean up temporary file
+            # Wyślij żądanie do API OpenAI
+            logger.info(f"Wysyłanie żądania do API OpenAI (model: {STT_MODEL})")
+            response = requests.post(API_URL, headers=headers, files=files)
+        
+        # Usuń plik tymczasowy
         try:
             os.remove(temp_file_path)
-            logger.info(f"Removed temporary file: {temp_file_path}")
+            logger.info(f"Usunięto plik tymczasowy: {temp_file_path}")
         except Exception as e:
-            logger.warning(f"Failed to remove temporary file: {str(e)}")
-
-        # Check for errors
+            logger.warning(f"Nie można usunąć pliku tymczasowego: {e}")
+        
+        # Sprawdź odpowiedź
         if response.status_code != 200:
-            logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
-
-            # Attempt to parse the error
-            error_msg = "Transcription failed"
-            try:
-                error_data = response.json()
-                if "error" in error_data and "message" in error_data["error"]:
-                    error_msg = error_data["error"]["message"]
-            except:
-                pass
-
-            raise HTTPException(status_code=500, detail=error_msg)
-
-        # Parse the response
+            logger.error(f"Błąd API OpenAI ({response.status_code}): {response.text}")
+            raise HTTPException(status_code=500, detail=f"Błąd API OpenAI: {response.text}")
+        
+        # Zwróć wynik
         result = response.json()
-        logger.info(f"Transcription successful: {result.get('text', '')[:50]}...")
-
+        logger.info(f"Transkrypcja zakończona pomyślnie: {result.get('text', '')[:50]}...")
         return result
-
+        
     except Exception as e:
+        # Usuń plik tymczasowy w przypadku błędu
+        try:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+        except:
+            pass
+        
+        logger.error(f"Wystąpił błąd podczas transkrypcji: {str(e)}")
         if isinstance(e, HTTPException):
             raise
-
-        logger.error(f"Error during transcription: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Błąd transkrypcji: {str(e)}")
